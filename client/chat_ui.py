@@ -1,0 +1,229 @@
+import tkinter as tk
+from tkinter import messagebox, scrolledtext
+from .chat_logic import ChatClient  # Import the networking logic
+
+
+class ChatUI:
+    """
+    ChatUI handles all Tkinter-based GUI:
+      - creating widgets (frames, buttons, text areas, listboxes)
+      - wiring button callbacks to ChatClient methods (connect, send_message, disconnect)
+      - registering ChatClient callbacks (on_connect_result, on_message_received, etc.)
+      - using root.after(...) to ensure thread-safe UI updates
+    """
+
+    def __init__(self, root: tk.Tk, server_host: str, server_port: int):
+        self.root = root
+        self.root.title("Chat Client")
+
+        # Initialize instance variables
+        self.username = None
+
+        # 1) Set up the ChatClient and register callbacks
+        self._setup_networking(server_host, server_port)
+
+        # 2) Build the login UI (username entry + Connect button)
+        self._create_login_ui()
+
+        # 3) Build the main chat UI (but do not show it yet)
+        self._create_chat_ui()
+        self._create_send_ui()
+
+        # 4) Configure window close behavior
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+    def _setup_networking(self, server_host: str, server_port: int):
+        """
+        Create the ChatClient instance, set ping interval, and register all callbacks.
+        """
+        self.chat_client = ChatClient(server_host, server_port, ping_interval=60)
+
+        # Register callbacks so ChatClient can notify us of events:
+        self.chat_client.on_connect_result = self._on_connect_result
+        self.chat_client.on_message_received = self._on_message_received
+        self.chat_client.on_user_list_updated = self._on_user_list_updated
+        self.chat_client.on_error = self._on_error
+        self.chat_client.on_disconnected = self._on_disconnected
+
+    def _create_login_ui(self):
+        """
+        Create and pack the widgets for the login screen (username entry + Connect button).
+        """
+        self.login_frame = tk.Frame(self.root)
+        self.login_frame.pack(padx=10, pady=10)
+
+        tk.Label(self.login_frame, text="Username:").grid(row=0, column=0, padx=5, pady=5)
+        self.username_entry = tk.Entry(self.login_frame)
+        self.username_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        self.connect_btn = tk.Button(
+            self.login_frame, text="Connect", command=self._try_connect
+        )
+        self.connect_btn.grid(row=0, column=2, padx=5, pady=5)
+
+    def _create_chat_ui(self):
+        """
+        Create the widgets for displaying active users and chat messages.
+        Do not pack them yet; packing happens after successful login.
+        """
+        self.chat_frame = tk.Frame(self.root)
+
+        # Active users list
+        self.users_label = tk.Label(self.chat_frame, text="Active Users:")
+        self.users_label.grid(row=0, column=0, padx=5, pady=5, sticky="nw")
+        self.users_listbox = tk.Listbox(self.chat_frame, width=20, height=15)
+        self.users_listbox.grid(row=1, column=0, padx=5, pady=5, sticky="n")
+
+        # Chat history text area
+        self.chat_label = tk.Label(self.chat_frame, text="Chat:")
+        self.chat_label.grid(row=0, column=1, padx=5, pady=5, sticky="nw")
+        self.chat_text = scrolledtext.ScrolledText(
+            self.chat_frame, width=50, height=15, state="disabled"
+        )
+        self.chat_text.grid(row=1, column=1, padx=5, pady=5, sticky="n")
+
+    def _create_send_ui(self):
+        """
+        Create the widgets for sending a message (To: entry, Message: entry, Send button).
+        Do not pack them yet; packing happens after successful login.
+        """
+        self.send_frame = tk.Frame(self.root)
+
+        tk.Label(self.send_frame, text="To:").grid(row=0, column=0, padx=5, pady=5)
+        self.to_entry = tk.Entry(self.send_frame, width=15)
+        self.to_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        tk.Label(self.send_frame, text="Message:").grid(row=0, column=2, padx=5, pady=5)
+        self.msg_entry = tk.Entry(self.send_frame, width=40)
+        self.msg_entry.grid(row=0, column=3, padx=5, pady=5)
+
+        self.send_btn = tk.Button(
+            self.send_frame, text="Send", command=self._send_message, state="disabled"
+        )
+        self.send_btn.grid(row=0, column=4, padx=5, pady=5)
+
+    def _try_connect(self):
+        """
+        Called when the user clicks “Connect”.
+        Grab the username and call chat_client.connect(username).
+        """
+        username = self.username_entry.get().strip()
+        if not username:
+            messagebox.showwarning("Warning", "Please enter a username.")
+            return
+
+        # Disable the Connect button to prevent double-click
+        self.connect_btn.config(state="disabled")
+        self.chat_client.connect(username)
+
+    def _on_connect_result(self, success: bool, error: str | None):
+        """
+        Callback from ChatClient indicating whether connect succeeded.
+        Runs in a background thread, so wrap UI updates in root.after().
+        """
+        def handle():
+            if success:
+                # Save the username, show chat UI, and enable Send button
+                self.username = self.username_entry.get().strip()
+                self._show_chat_ui()
+                self._append_chat(f"*** Connected as {self.username} ***\n")
+                self.send_btn.config(state="normal")
+            else:
+                # Show error and re-enable Connect button
+                messagebox.showerror("Error", f"Connection refused: {error}")
+                self.connect_btn.config(state="normal")
+
+        self.root.after(0, handle)
+
+    def _show_chat_ui(self):
+        """
+        Hide the login frame and show the main chat + send frames.
+        """
+        self.login_frame.pack_forget()
+        self.chat_frame.pack(padx=10, pady=5)
+        self.send_frame.pack(padx=10, pady=5)
+
+    def _on_message_received(self, sender: str, text: str):
+        """
+        Callback: a private message arrived from `sender`.
+        Wrap in root.after to ensure we update widgets on the GUI thread.
+        """
+        def handle():
+            self._append_chat(f"{sender}: {text}\n")
+
+        self.root.after(0, handle)
+
+    def _on_user_list_updated(self, users: list[str]):
+        """
+        Callback: the list of active users updated.
+        Wrap in root.after to update the Listbox on the GUI thread.
+        """
+        def handle():
+            self.users_listbox.delete(0, tk.END)
+            for u in users:
+                if u != self.username:
+                    self.users_listbox.insert(tk.END, u)
+
+        self.root.after(0, handle)
+
+    def _on_error(self, error_text: str):
+        """
+        Callback: the server returned an error action.
+        Display it in the chat area (wrapped in root.after for thread safety).
+        """
+        def handle():
+            self._append_chat(f"[Error] {error_text}\n")
+
+        self.root.after(0, handle)
+
+    def _on_disconnected(self):
+        """
+        Callback: the connection to the server was lost (or client disconnected).
+        """
+        def handle():
+            self._append_chat("*** Disconnected from server ***\n")
+            self.send_btn.config(state="disabled")
+
+        self.root.after(0, handle)
+
+    def _send_message(self):
+        """
+        Called when the user clicks “Send”.
+        Reads “To” and “Message” fields, calls chat_client.send_message,
+        and appends the local “Me ->” line to the chat widget.
+        """
+        to_user = self.to_entry.get().strip()
+        text = self.msg_entry.get().strip()
+        if not to_user or not text:
+            messagebox.showwarning("Warning", "Both 'To' and 'Message' fields must be filled.")
+            return
+
+        self.chat_client.send_message(to_user, text)
+        self._append_chat(f"Me -> {to_user}: {text}\n")
+        self.msg_entry.delete(0, tk.END)
+
+    def _append_chat(self, text: str):
+        """
+        Inserts a line of text into the chat Text widget.
+        Always called from the GUI thread (via root.after).
+        """
+        self.chat_text.config(state="normal")
+        self.chat_text.insert(tk.END, text)
+        self.chat_text.see(tk.END)
+        self.chat_text.config(state="disabled")
+
+    def _on_closing(self):
+        """
+        Called when the user attempts to close the window (WM_DELETE_WINDOW).
+        Cleanly disconnect from the server and destroy the GUI.
+        """
+        if self.chat_client.running:
+            self.chat_client.disconnect()
+        self.root.destroy()
+
+
+if __name__ == "__main__":
+    # If run directly, create the main window and launch ChatUI
+    root = tk.Tk()
+    ui = ChatUI(root, server_host="127.0.0.1", server_port=7777)
+    root.mainloop()
