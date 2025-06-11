@@ -3,6 +3,9 @@ import threading
 import json
 import time
 import protocol
+import os
+import base64
+import mimetypes
 
 
 class ChatClient:
@@ -33,10 +36,17 @@ class ChatClient:
         self.on_error = None  # signature: fn(error_text: str)
         self.on_disconnected = None  # signature: fn()
 
+        # File transfer callbacks (to be set by UI)
+        self.on_file_request = None  # signature: fn(sender: str, filename: str, filesize: int, filetype: str)
+        self.on_file_accept = None  # signature: fn(sender: str, filename: str)
+        self.on_file_cancel = None  # signature: fn(sender: str, filename: str, reason: str)
+        self.on_file_data = None  # signature: fn(sender: str, filename: str, chunk_index: int, data: bytes, is_last_chunk: bool)
+        self.on_file_complete = None  # signature: fn(sender: str, filename: str)
+
     def connect(self, username: str):
         """
         Attempt to establish a TCP connection and send {"action":"connect","username":...}.
-        After reading the server’s response, invoke on_connect_result(success, error).
+        After reading the server's response, invoke on_connect_result(success, error).
         If successful, start background receiver and ping threads.
         """
         try:
@@ -49,8 +59,8 @@ class ChatClient:
                 self.on_connect_result(False, f"Cannot connect to server: {e}")
             return
 
-        # Send the “connect” request
-        payload = {"action": protocol.ACTION_CONNECT, "username": username}
+        # Send the "connect" request
+        payload = protocol.build_connect(username)
         try:
             self._send_json(payload)
         except Exception as e:
@@ -71,7 +81,7 @@ class ChatClient:
             self.sock.close()
             return
 
-        # Check server’s answer
+        # Check server's answer
         if resp.get("action") == protocol.ACTION_CONNECT and resp.get("status") == "ok":
             # Successfully registered
             if self.on_connect_result:
@@ -96,12 +106,84 @@ class ChatClient:
         if not self.running:
             return
 
-        payload = {"action": protocol.ACTION_MESSAGE, "to": to, "message": message}
+        payload = protocol.build_message(to, message)
         try:
             self._send_json(payload)
         except Exception as e:
             if self.on_error:
                 self.on_error(f"Send error: {e}")
+
+    def send_file_request(self, to: str, file_path: str):
+        """
+        Initiates a file transfer.
+        Reads the file, determines its size and type,
+        then sends a request (file_transfer_request) to the recipient.
+        """
+        if not self.running:
+            return
+        try:
+            filesize = os.path.getsize(file_path)
+            filetype, _ = mimetypes.guess_type(file_path, strict=False)
+            if filetype is None:
+                filetype = "application/octet-stream"
+            filename = os.path.basename(file_path)
+            payload = protocol.build_file_request("", to, filename, filesize, filetype)
+            self._send_json(payload)
+        except Exception as e:
+            if self.on_error:
+                self.on_error(f"Send file request error: {e}")
+
+    def send_file_accept(self, to: str, filename: str):
+        """
+        Send message (file_transfer_accept) from recipient to sender.
+        """
+        if not self.running:
+            return
+        payload = protocol.build_file_accept("", to, filename)
+        try:
+            self._send_json(payload)
+        except Exception as e:
+            if self.on_error:
+                self.on_error(f"Send file accept error: {e}")
+
+    def send_file_cancel(self, to: str, filename: str, reason: str = ""):
+        """
+        Send message (file_transfer_cancel) when user refused or an error is occurred.
+        """
+        if not self.running:
+            return
+        payload = protocol.build_file_cancel("", to, filename, reason)
+        try:
+            self._send_json(payload)
+        except Exception as e:
+            if self.on_error:
+                self.on_error(f"Send file cancel error: {e}")
+
+    def send_file_data(self, to: str, filename: str, chunk_index: int, data: bytes, is_last_chunk: bool):
+        """
+        Send file chunk (file_transfer_data) to recipient.
+        """
+        if not self.running:
+            return
+        payload = protocol.build_file_data("", to, filename, chunk_index, data, is_last_chunk)
+        try:
+            self._send_json(payload)
+        except Exception as e:
+            if self.on_error:
+                self.on_error(f"Send file data error: {e}")
+
+    def send_file_complete(self, to: str, filename: str):
+        """
+        Send message (file_transfer_complete) when the transfer is completed.
+        """
+        if not self.running:
+            return
+        payload = protocol.build_file_complete("", to, filename)
+        try:
+            self._send_json(payload)
+        except Exception as e:
+            if self.on_error:
+                self.on_error(f"Send file complete error: {e}")
 
     def disconnect(self):
         """
@@ -112,7 +194,7 @@ class ChatClient:
             return
 
         try:
-            self._send_json({"action": protocol.ACTION_DISCONNECT})
+            self._send_json(protocol.build_disconnect())
         except:
             pass
 
@@ -159,6 +241,43 @@ class ChatClient:
                 err = msg.get("error", "unknown")
                 if self.on_error:
                     self.on_error(err)
+            # File transfer events handlers
+            elif action == protocol.ACTION_FILE_REQUEST:
+                sender = msg.get("from")
+                filename = msg.get("filename")
+                filesize = msg.get("filesize")
+                filetype = msg.get("filetype")
+                if self.on_file_request:
+                    self.on_file_request(sender, filename, filesize, filetype)
+            elif action == protocol.ACTION_FILE_ACCEPT:
+                sender = msg.get("from")
+                filename = msg.get("filename")
+                if self.on_file_accept:
+                    self.on_file_accept(sender, filename)
+            elif action == protocol.ACTION_FILE_CANCEL:
+                sender = msg.get("from")
+                filename = msg.get("filename")
+                reason = msg.get("reason", "")
+                if self.on_file_cancel:
+                    self.on_file_cancel(sender, filename, reason)
+            elif action == protocol.ACTION_FILE_DATA:
+                sender = msg.get("from")
+                filename = msg.get("filename")
+                data_b64 = msg.get("data")
+                is_last_chunk = msg.get("is_last_chunk", False)
+                try:
+                    data = base64.b64decode(data_b64)
+                except Exception as e:
+                    if self.on_error:
+                        self.on_error(f"Decode file data error: {e}")
+                    continue
+                if self.on_file_data:
+                    self.on_file_data(sender, filename, data, is_last_chunk)
+            elif action == protocol.ACTION_FILE_COMPLETE:
+                sender = msg.get("from")
+                filename = msg.get("filename")
+                if self.on_file_complete:
+                    self.on_file_complete(sender, filename)
 
         # Exiting loop means the connection is gone
         self.running = False
@@ -168,12 +287,12 @@ class ChatClient:
     def _ping_loop(self):
         """
         Background thread that sleeps for ping_interval seconds,
-        then sends {"action":"ping"} to let the server know we’re still alive.
+        then sends {"action":"ping"} to let the server know we're still alive.
         """
         while self.running:
             time.sleep(self.ping_interval)
             try:
-                self._send_json({"action":protocol.ACTION_PING})
+                self._send_json(protocol.build_ping())
             except:
                 break  # Failed to send a ping–exit loop
 

@@ -30,7 +30,7 @@ def broadcast_user_list():
     """
     with clients_lock:
         user_list = list(clients.keys())
-        payload = {'action': protocol.ACTION_USER_LIST, 'users': user_list}
+        payload = protocol.build_user_list(user_list)
         for username, data in clients.items():
             try:
                 send_json(data['conn'], payload)
@@ -106,23 +106,24 @@ def handle_client(conn: socket.socket, addr):
          - "ping" -> update last_ping timestamp
          - "message" -> forward to the specified recipient
          - "disconnect" -> break and clean up
+         - "file_transfer_request", "file_transfer_accept", "file_transfer_cancel",
+            "file_transfer_data", "file_transfer_complete" -> forward to the specified recipient
          - Anything else -> send back an error
       5. When loop ends (client closed or timed out), remove client and broadcast updated list.
     """
     print(f"[NEW CONNECTION] Client from {addr} connected.")
 
-    # Step 1: Register the client
+    # Register the client
     username, err = register_client(conn, addr)
     if not username:
         # Registration failed: send error and close socket
-        error_payload = {'action': protocol.ACTION_CONNECT, 'status': 'error', 'error': err}
-        send_json(conn, error_payload)
+        send_json(conn, protocol.build_connect_response_err(err))
         print(f"[REGISTRATION FAILED] {addr} -> {err}")
         conn.close()
         return
 
-    # Step 2: Inform client that registration succeeded
-    send_json(conn, {'action': protocol.ACTION_CONNECT, 'status': 'ok'})
+    # Inform client that registration succeeded
+    send_json(conn, protocol.build_connect_response_ok())
     broadcast_user_list()
 
     file_obj = conn.makefile(mode='r', encoding='utf-8')
@@ -154,7 +155,7 @@ def handle_client(conn: socket.socket, addr):
                 text = msg.get('message', '')
 
                 if not target or not text:
-                    send_json(conn, {'action': protocol.ACTION_ERROR, 'error': 'wrong message format'})
+                    send_json(conn, protocol.build_error('wrong message format'))
                     continue
 
                 with clients_lock:
@@ -164,22 +165,44 @@ def handle_client(conn: socket.socket, addr):
                         send_json(clients[target]['conn'], payload)
                     else:
                         # Recipient not found or offline
-                        send_json(conn, {'action': protocol.ACTION_ERROR, 'error': f'user {target} not found'})
+                        send_json(conn, protocol.build_error(f'user {target} not found'))
 
             elif action == protocol.ACTION_DISCONNECT:
                 # Client requested a clean disconnect
                 print(f"[DISCONNECT REQUEST] '{username}' requested disconnect.")
                 break
 
+            # File transfer events handlers
+            elif action in (
+                    protocol.ACTION_FILE_REQUEST,
+                    protocol.ACTION_FILE_ACCEPT,
+                    protocol.ACTION_FILE_CANCEL,
+                    protocol.ACTION_FILE_DATA,
+                    protocol.ACTION_FILE_COMPLETE
+            ):
+                target = msg.get('to')
+                if not target:
+                    send_json(conn, protocol.build_error("missing recipient (to)"))
+                    continue
+                with clients_lock:
+                    if target in clients:
+                        # Send message to target
+                        payload = msg.copy()
+                        payload['from'] = username
+                        send_json(clients[target]['conn'], payload)
+                    else:
+                        # Recipient is not found
+                        send_json(conn, protocol.build_error(f'user {target} not found'))
+
             else:
                 # Unknown action: inform the client
-                send_json(conn, {'action': protocol.ACTION_ERROR, 'error': 'unknown action'})
+                send_json(conn, protocol.build_error('unknown action'))
 
     except Exception as e:
         print(f"[EXCEPTION] Error handling '{username}': {e}")
 
     finally:
-        # Step 5: Clean up
+        # Clean up
         remove_client(username)
         try:
             conn.close()
@@ -190,7 +213,7 @@ def handle_client(conn: socket.socket, addr):
 def inactive_checker():
     """
     Background thread, which every 30 seconds checks all clients,
-    and if a client didn't ping for more that 120 seconds, doesn't count them as active.
+    and if a client didn't ping for more than 120 seconds, doesn't count them as active.
     """
     while True:
         time.sleep(30)
@@ -219,7 +242,7 @@ def start_server():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen()
-    print(f"[STARTED] Server is listening on {HOST}:{PORT}")
+    print(f"[STARTED] Server is listening on {HOST}: {PORT}")
 
     # Run background thread to check inactive clients.
     checker_thread = threading.Thread(target=inactive_checker, daemon=True)
