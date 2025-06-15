@@ -378,5 +378,5 @@ class ChatUI:
 if __name__ == "__main__":
     # Create the main window and launch ChatUI
     root = tk.Tk()
-    ui = ChatUI(root, server_host="127.0.0.1", server_port=7777)
+    ui = ChatUI(root, server_host="16.170.226.19", server_port=7777)
     root.mainloop()
