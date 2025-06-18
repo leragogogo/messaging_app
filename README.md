@@ -1,15 +1,16 @@
+
 # Network Messaging Application
 The network messaging app with the client-server architecture that follows TCP for communication.
 
-- It allows a real-time messaging and file transfer.
-- The client has Tkinter-based GUI.
+- It allows real-time messaging and file transfer.
+- The client has a Tkinter-based GUI.
 - The server part is deployed with AWS. 
 
 When you clone the project you can start only clients and it's ready to use.
 
 
-## Prerequirements
-Python version 3.6+ is needed for tkinter.
+## Requirements
+Python version 3.6+ is needed for the Tkinter.
 
 ## Setup Guide
 Follow the next steps to run this app locally: 
@@ -26,7 +27,7 @@ Follow the next steps to run this app locally:
     ```
 3. **Change server host to localhost**
 
-   in client/client_ui change the main method to:
+   In client/client_ui change the main method to:
 
    ```python
     if __name__ == "__main__":
