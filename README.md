@@ -27,7 +27,7 @@ Follow the next steps to run this app locally:
     ```
 3. **Change server host to localhost**
 
-   In client/client_ui change the main method to:
+   In client/chat_ui change the main method to:
 
    ```python
     if __name__ == "__main__":
